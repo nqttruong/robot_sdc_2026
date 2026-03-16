@@ -1,0 +1,21 @@
+🔌 Chân kết nối (đúng với Mega của bạn)
+
+PS2 → Arduino Mega
+
+DAT → D50
+
+CMD → D51
+
+CLK → D52
+
+CS → D53
+
+3.3V → 3.3V
+
+GND → GND
+
+Servo
+
+Trái → D30
+
+Phải → D31

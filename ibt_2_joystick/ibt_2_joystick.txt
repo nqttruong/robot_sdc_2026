@@ -1,0 +1,20 @@
+Nếu robot 2 bánh → cần 2 IBT-2
+Motor trái
+IBT-2	Mega
+RPWM	D5
+LPWM	D6
+Motor phải
+IBT-2	Mega
+RPWM	D9
+LPWM	D10
+
+
+🎮 Nguyên lý điều khiển IBT-2
+PWM	Kết quả
+RPWM = 200	quay thuận
+LPWM = 200	quay ngược
+cả hai = 0	dừng
+
+Motor → B+ B-
+
+Nguồn motor → 12V / pin
