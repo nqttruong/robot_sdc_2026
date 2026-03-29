@@ -1,141 +1,203 @@
 #include <PS2X_lib.h>
-
+#include <EEPROM.h>
 PS2X ps2x;
 
-// motor trái
+// ===== MOTOR DC (DI CHUYỂN) =====
 #define L_RPWM 5
-#define L_LPWM 6
+#define L_LPWM 3
+#define R_RPWM 7
+#define R_LPWM 8
 
-// motor phải
-#define R_RPWM 9
-#define R_LPWM 10
+// ===== STEPPER TB6600 (NÂNG HẠ) =====
+#define STEP_PIN 11
+#define DIR_PIN   9
 
-// TB6600
-#define STEP_PIN 2
-#define DIR_PIN  3
+// ===== ĐỘNG CƠ HÚT =====
+#define PIN_HUT   2
+#define PIN_VALVE 4
 
-int DEADZONE = 12;
-int MAX_SPEED = 200;
+// ===== BIẾN ĐIỀU KHIỂN XE =====
+int DEADZONE = 15;
+int MAX_SPEED = 160;
+const int TURN_MAX = 60;
+float accel = 0.1;
+float currentLeft = 0;
+float currentRight = 0;
+float a = 100.0f;
 
-unsigned long lastStepTime = 0;
-int stepDelay = 6000;   // nhỏ = quay nhanh
-bool stepState = LOW;
+bool hutState;
 
+unsigned long valveTimer = 0;
+bool valveActive = false;
+const int valveDuration = 90;
+
+bool ps2Connected = false;
+
+// ================= SETUP =================
 void setup() {
 
   Serial.begin(9600);
 
-  ps2x.config_gamepad(52,51,53,50,true,true);
+  int error = ps2x.config_gamepad(52,51,53,50,true,true);
+
+  if(error == 0){
+    ps2Connected = true;
+    Serial.println("PS2 Connected");
+  }
+  else{
+    Serial.println("PS2 Error");
+  }
 
   pinMode(L_RPWM,OUTPUT);
   pinMode(L_LPWM,OUTPUT);
   pinMode(R_RPWM,OUTPUT);
   pinMode(R_LPWM,OUTPUT);
-  pinMode(STEP_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
+
+  pinMode(STEP_PIN,OUTPUT);
+  pinMode(DIR_PIN,OUTPUT);
+
+  pinMode(PIN_HUT,OUTPUT);
+
+  hutState = EEPROM.read(0); // đọc trạng thái cũ
+  digitalWrite(PIN_HUT, hutState);
+
+  pinMode(PIN_VALVE,OUTPUT);
+  digitalWrite(PIN_VALVE,LOW);
+
+  setup_timer_1();
 }
 
-void setMotor(int rpwmPin,int lpwmPin,int speed)
-{
-  speed = constrain(speed,-255,255);
+// ================= LOOP =================
+void loop(){
 
-  if(speed > 0)
-  {
-    analogWrite(rpwmPin,speed);
-    analogWrite(lpwmPin,0);
-  }
-  else if(speed < 0)
-  {
-    analogWrite(rpwmPin,0);
-    analogWrite(lpwmPin,-speed);
-  }
-  else
-  {
-    analogWrite(rpwmPin,0);
-    analogWrite(lpwmPin,0);
-  }
-}
-
-void loop() {
+  if(!ps2Connected) return;
 
   ps2x.read_gamepad();
 
-  // ===== JOYSTICK =====
-  int ly = 128 - ps2x.Analog(PSS_LY);   // tiến/lùi
-  int rx = ps2x.Analog(PSS_RX) - 128;   // rẽ
+  // ===== LÁI XE =====
+  int ly = 128 - ps2x.Analog(PSS_LY);
+  int rx = ps2x.Analog(PSS_RX) - 128;
 
-  if(abs(ly) < DEADZONE) ly = 0;
-  if(abs(rx) < DEADZONE) rx = 0;
+  if(abs(ly)<DEADZONE) ly=0;
+  if(abs(rx)<DEADZONE) rx=0;
 
-  float speed = ly / 128.0;
-  float turn  = rx / 128.0;
+  float speedVal = (ly/128.0)*(ly/128.0)*(ly>=0?1:-1);
+  float turnVal  = (rx/128.0)*(rx/128.0)*(rx>=0?1:-1);
 
-  speed = speed * abs(speed);
-  turn  = turn  * abs(turn);
+  currentLeft  += ((speedVal*MAX_SPEED + turnVal*TURN_MAX)-currentLeft)*accel;
+  currentRight += ((speedVal*MAX_SPEED - turnVal*TURN_MAX)-currentRight)*accel;
 
-  int motorSpeed = speed * MAX_SPEED;
-  int motorTurn  = turn  * MAX_SPEED;
+  if(ps2x.ButtonPressed(PSB_CROSS)){a+=30;if(a>160)a=160;}
+  if(ps2x.ButtonPressed(PSB_CIRCLE)){a-=30;if(a<10)a=10;}
 
-  // ===== NÚT QUAY =====
-  bool btnLeft  = ps2x.Button(PSB_L1);
-  bool btnRight = ps2x.Button(PSB_L2);
+  setMotor(L_RPWM,L_LPWM,currentLeft*(a/160.0));
+  setMotor(R_RPWM,R_LPWM,currentRight*(a/160.0));
 
-  int leftMotor, rightMotor;
-
-  if(btnLeft)
-  {
-    leftMotor  = -MAX_SPEED;
-    rightMotor =  MAX_SPEED;
+  // ===== STEPPER =====
+  if(ps2x.Button(PSB_R2)){
+    setStepperFrequency(2300);
+    digitalWrite(DIR_PIN,LOW);
+    startStepper();
   }
-  else if(btnRight)
-  {
-    leftMotor  =  MAX_SPEED;
-    rightMotor = -MAX_SPEED;
+  else if(ps2x.Button(PSB_R1)){
+    setStepperFrequency(2300);
+    digitalWrite(DIR_PIN,HIGH);
+    startStepper();
   }
-  else
-  {
-    leftMotor  = motorSpeed + motorTurn;
-    rightMotor = motorSpeed - motorTurn;
-
-    if(motorSpeed == 0)
-    {
-      leftMotor  = motorTurn;
-      rightMotor = -motorTurn;
-    }
+  else{
+    stopStepper();
   }
 
-  leftMotor  = constrain(leftMotor, -255, 255);
-  rightMotor = constrain(rightMotor, -255, 255);
+  // ===== HÚT =====
+if(ps2x.ButtonPressed(PSB_L1)){
+  hutState = true;
+  EEPROM.write(0, hutState);
+  Serial.println("HUT ON");
+}
 
-  setMotor(L_RPWM, L_LPWM, leftMotor);
-  setMotor(R_RPWM, R_LPWM, rightMotor);
+if(ps2x.ButtonPressed(PSB_L2)){
 
-  // ===== STEP MOTOR TB6600 =====
-  bool r1 = ps2x.Button(PSB_R1);
-  bool r2 = ps2x.Button(PSB_R2);
+  hutState = false;
+  EEPROM.write(0, hutState);
+  Serial.println("HUT OFF");
 
-  if(r1 || r2)
-  {
-    digitalWrite(DIR_PIN, r1); // R1 thuận, R2 ngược
+  // bật van
+  digitalWrite(PIN_VALVE, HIGH);
+  valveTimer = millis();
+  valveActive = true;
+}
 
-    // 👉 chỉnh tốc độ step bằng joystick phải (trục Y)
-    int ry = 128 - ps2x.Analog(PSS_RY);
-    if(abs(ry) < DEADZONE) ry = 0;
+// kiểm tra thời gian đóng van
+if(valveActive && millis() - valveTimer > valveDuration){
+  digitalWrite(PIN_VALVE, LOW);
+  valveActive = false;
+}
 
-    // map thành delay (nhanh/chậm)
-    stepDelay = map(abs(ry), 0, 128, 1500, 200);
+digitalWrite(PIN_HUT, hutState);
 
-    if(micros() - lastStepTime >= stepDelay)
-    {
-      lastStepTime = micros();
 
-      digitalWrite(STEP_PIN, HIGH);
-      delayMicroseconds(5);   // xung chuẩn TB6600
-      digitalWrite(STEP_PIN, LOW);
-    }
+  // ===== VAN NHẢ =====
+  // if(ps2x.ButtonPressed(PSB_PAD_UP)){
+  //   digitalWrite(PIN_VALVE,HIGH);
+  //   valveTimer=millis();
+  //   valveActive=true;
+  // }
+
+  // if(valveActive && millis()-valveTimer>valveDuration){
+  //   digitalWrite(PIN_VALVE,LOW);
+  //   valveActive=false;
+  // }
+
+  delay(10);
+}
+
+// ================= HÀM HỖ TRỢ =================
+
+void setMotor(int rpwmPin,int lpwmPin,int speed){
+  speed=constrain(speed,-255,255);
+
+  if(speed>0){
+    analogWrite(rpwmPin,speed);
+    analogWrite(lpwmPin,0);
   }
-  else
-  {
-    digitalWrite(STEP_PIN, LOW);
+  else if(speed<0){
+    analogWrite(rpwmPin,0);
+    analogWrite(lpwmPin,-speed);
   }
+  else{
+    analogWrite(rpwmPin,0);
+    analogWrite(lpwmPin,0);
+  }
+}
+
+void setStepperFrequency(uint32_t freq){
+  if(freq==0){stopStepper();return;}
+
+  uint32_t topValue=(16000000/(8*freq))-1;
+
+  if(topValue>65535)topValue=65535;
+
+  ICR1=topValue;
+  OCR1A=topValue/2;
+}
+
+void startStepper(){
+  TCCR1A|=(1<<COM1A1);
+  TCCR1B|=(1<<CS11);
+}
+
+void stopStepper(){
+  TCCR1A&=~(1<<COM1A1);
+  TCCR1B&=~(1<<CS11);
+  digitalWrite(STEP_PIN,LOW);
+}
+
+void setup_timer_1(){
+  TCCR1A=0;
+  TCCR1B=0;
+
+  TCCR1A|=(1<<WGM11);
+  TCCR1B|=(1<<WGM13)|(1<<WGM12);
+
+  setStepperFrequency(2500);
 }
